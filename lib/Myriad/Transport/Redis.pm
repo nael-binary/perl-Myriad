@@ -64,37 +64,24 @@ Number of items to allow per batch (pending / readgroup calls).
 method batch_count () { $batch_count }
 
 async method oldest_processed_id($stream) {
-    my ($v) = await $redis->xinfo(GROUPS => $stream);
+    my $v = await $self->consumer_group_info(GROUPS => $stream);
     my $oldest;
     for my $group (@$v) {
-        # Use snake_case instead of kebab-case so that we can map cleanly to Perl conventions
-        my %info = pairmap {
-            (
-                ($a =~ tr/-/_/r),
-                $b
-            )
-        } @$group;
-        $log->tracef('Group info: %s', \%info);
 
-        my $group_name = $info{name};
+        my $group_name = $group->{name};
+        my $f = await $self->consumer_group_info(CONSUMERS => $stream, $group_name);
+        $log->tracef('Consumer info: %s', $f);
+        $log->tracef('Pending check where oldest was %s and last delivered %s', $oldest, $group->{last_delivered_id});
+        $oldest //= $group->{last_delivered_id};
+        $oldest = $group->{last_delivered_id} if $group->{last_delivered_id} and $self->compare_id($oldest, $group->{last_delivered_id}) > 0;
         {
-            my ($v) = await $redis->xinfo(CONSUMERS => $stream, $group_name);
-            for my $consumer (@$v) {
-                my %info = pairmap { $a =~ tr/-/_/; ($a, $b) } @$consumer;
-                $log->tracef('Consumer info: %s', \%info);
-            }
-        }
-        $log->tracef('Pending check where oldest was %s and last delivered %s', $oldest, $info{last_delivered_id});
-        $oldest //= $info{last_delivered_id};
-        $oldest = $info{last_delivered_id} if $info{last_delivered_id} and compare_id($oldest, $info{last_delivered_id}) > 0;
-        {
-            my ($v) = await $redis->xpending($stream, $group_name);
+            my ($v) = await $self->pending_messages_info($stream, $group_name);
             my ($count, $first_id, $last_id, $consumers) = @$v;
             $log->tracef('Pending info %s', $v);
             $log->tracef('Pending from %s', $first_id);
             $log->tracef('Pending check where oldest was %s and first %s', $oldest, $first_id);
             $oldest //= $first_id;
-            $oldest = $first_id if defined($first_id) and compare_id($oldest, $first_id) > 0;
+            $oldest = $first_id if defined($first_id) and $self->compare_id($oldest, $first_id) > 0;
         }
     }
     return $oldest;
@@ -198,8 +185,12 @@ method iterate(%args) {
     $src;
 }
 
+async method xinfo(@args) {
+    return await $redis->xinfo(@args);
+}
+
 async method stream_info($stream) {
-    my ($v) = await $redis->xinfo(
+    my $v = await $self->xinfo(
         STREAM => $stream
     );
     my %info = pairmap {
@@ -209,8 +200,17 @@ async method stream_info($stream) {
         )
     } @$v;
     $log->tracef('Currently %d groups, %d total length', $info{groups}, $info{length});
-    $log->tracef('Full info %s', \%info);
     return \%info;
+}
+
+async method consumer_group_info(@args) {
+    my $v = await $self->xinfo(@args);
+    my @info;
+    for my $s ($v->@*) {
+        push @info, {pairmap { ( ($a =~ tr/-/_/r), $b ) } $s->@*};
+    }
+    $log->tracef('Full info %s', \@info);
+    return \@info;
 }
 
 =head2 cleanup
@@ -303,11 +303,10 @@ method pending(%args) {
     Future->wait_any(
         $src->completed->without_cancel,
         (async sub {
-            $instance = await $self->redis_from_pool;
             my $start = '-';
             while (1) {
                 await $src->unblocked;
-                my ($pending) = await $instance->xpending(
+                my ($pending) = await $self->xpending(
                     $stream,
                     $group,
                     $start, '+',
@@ -328,9 +327,7 @@ method pending(%args) {
                 last unless @$pending >= $self->batch_count;
             }
         })->(),
-    )->on_ready(sub {
-        $self->return_redis_to_pool($instance) if $instance;
-    })->on_fail(sub  {
+    )->on_fail(sub  {
         my $error = shift;
         $log->errorf("Failed while looking for pending messages due: %s", $error);
     })->retain;
@@ -399,7 +396,7 @@ by default it's `$` which means the last message.
 
 async method create_group($stream, $group, $start_from = '$') {
     try {
-        await $redis->xgroup('CREATE', $stream, $group, $start_from, 'MKSTREAM');
+        await $self->xgroup('CREATE', $stream, $group, $start_from, 'MKSTREAM');
     }
     catch ($e) {
         if($e =~ /BUSYGROUP/){
@@ -427,7 +424,11 @@ This currently just execute C<XPENDING> without any filtering.
 =cut
 
 async method pending_messages_info($stream, $group) {
-    await $redis->xpending($stream, $group);
+    return await $self->xpending($stream, $group);
+}
+
+async method xpending(@args) {
+    await $redis->xpending(@args);
 }
 
 async method xadd (@args) {
