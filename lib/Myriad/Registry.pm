@@ -32,7 +32,6 @@ declare_exception UnknownClass => (
 use Myriad::API;
 
 has %rpc ;
-has %service_by_name;
 has %batch;
 has %emitter;
 has %receiver;
@@ -74,25 +73,9 @@ async method add_service (%args) {
     $self->loop->add(
         $srv
     );
-    my $k = refaddr($srv);
-    weaken($service_by_name{$service_name} = $srv);
-    weaken($myriad->services->{$k} = $srv);
+    weaken($myriad->services->{$service_name} = $srv);
 
     return;
-}
-
-=head2 service_by_name
-
-Looks up the given service, returning the instance if it exists.
-
-Will throw an exception if the service cannot be found.
-
-=cut
-
-method service_by_name ($k) {
-    return $service_by_name{$k} // Myriad::Exception::Registry::ServiceNotFound->throw(
-        reason => 'service ' . $k . ' not found'
-    );
 }
 
 =head2 add_rpc

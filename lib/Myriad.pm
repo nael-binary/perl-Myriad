@@ -468,8 +468,9 @@ Will throw an exception if the service cannot be found.
 =cut
 
 method service_by_name ($srv) {
-    return $self->registry->service_by_name(
-        $srv,
+    $log->warnf('CAAAAAALEEEED %s', $srv);
+    return $services->{$srv} // Myriad::Exception::InternalError->throw(
+        message => 'service ' . $srv . ' not found'
     );
 }
 
